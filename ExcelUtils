@@ -1,0 +1,249 @@
+package com.hthk.dt.billing.reporting;
+
+import com.hthk.dt.billing.reporting.custom.ExcelColumn;
+import org.apache.commons.beanutils.BeanUtils;
+import org.apache.commons.beanutils.ConvertUtils;
+import org.apache.commons.beanutils.Converter;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.lang.reflect.Field;
+import java.text.DecimalFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * @Author: samccs
+ * @Date: 2020/5/15 上午 09:32
+ * @Version 1.0
+ */
+public class ExcelProcessUtils {
+
+    static Logger Log = LoggerFactory.getLogger(ExcelProcessUtils.class);
+
+    private static final String XLS = ".xls";
+    private static final String XLSX = ".xlsx";
+
+    /**
+     *  Get Excel Work book According to filePath
+     * @param path file path
+     * @return workBook
+     */
+    public static Workbook getWorkBook(String path) {
+        Workbook workbook = null;
+        if (path == null)
+            return null;
+        String extString = path.substring(path.lastIndexOf("."));
+        InputStream is;
+        try {
+            File file = new File(path);
+            is = new FileInputStream(file);
+            if (XLS.equals(extString)) {
+                workbook = new HSSFWorkbook(is);
+            } else if (XLSX.equals(extString)) {
+                workbook = new XSSFWorkbook(is);
+            }
+        } catch (IOException e) {
+            Log.error(e.getMessage(), e);
+        }
+        return workbook;
+    }
+
+    /**
+     * Parse Excel to Object
+     *
+     * @param workbook Excel workBook
+     * @param <T> Object define the column
+     * @return Object
+     */
+    public static <T> List<T> parseExcel(Workbook workbook, Class<T> clazz) {
+        List<T> objectList = new ArrayList<>();
+        for (int sheetNum = 0; sheetNum < workbook.getNumberOfSheets(); sheetNum++) {
+            Sheet sheet = workbook.getSheetAt(sheetNum);
+            if (null == sheet) {
+                continue;
+            }
+            int firstRowNum = sheet.getFirstRowNum();
+            // Excel Header
+            Row headerRow = sheet.getRow(firstRowNum);
+            if (null == headerRow) {
+                Log.error("Parse Excel error");
+                return null;
+            }
+            int rowStart = firstRowNum + 1;
+            int rowEnd = sheet.getPhysicalNumberOfRows();
+            for (int rowNum = rowStart; rowNum < rowEnd; rowNum++) {
+                Row row = sheet.getRow(rowNum);
+                if (null == row) {
+                    continue;
+                }
+                T t = parseData2Object(headerRow, row, clazz);
+                objectList.add(t);
+            }
+        }
+        return objectList;
+    }
+
+    private static <T> T parseData2Object(Row headerRow, Row row, Class<T> clazz) {
+        try {
+            T t = clazz.getDeclaredConstructor().newInstance();
+            Field[] declaredFields = t.getClass().getDeclaredFields();
+            int endNum = row.getPhysicalNumberOfCells();
+            short startNum = row.getFirstCellNum();
+            // Register Date Converter
+            ConvertUtils.register(new Converter() {
+                @Override
+                public Object convert(Class aClass, Object value) {
+                    Date date1 =null;
+                    if(value instanceof String){
+                        String date = (String) value;
+                        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+                        try {
+                            date1 = sdf.parse(date);
+                        } catch (ParseException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                    return date1;
+                }
+            }, Date.class);
+            for (int rowNum = startNum; rowNum < endNum; rowNum++) {
+                Cell cell = headerRow.getCell(rowNum);
+                String header = convertCellValueToString(cell);
+                for (Field field : declaredFields) {
+                    ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
+                    String fieldName = annotation.name();
+                    if (StringUtils.upperCase(header).equals(StringUtils.upperCase(fieldName))) {
+                        field.setAccessible(true);
+                        Cell dataCell = row.getCell(rowNum);
+                        BeanUtils.setProperty(t, field.getName(), convertCellValueToString(dataCell));
+                        break;
+                    }
+                }
+            }
+            return t;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public static String convertCellValueToString(Cell cell) {
+        if (cell == null) {
+            return null;
+        }
+        String returnValue = null;
+        switch (cell.getCellType()) {
+            case NUMERIC:
+                if (DateUtil.isCellDateFormatted(cell)) {
+                    Date dateCellValue = cell.getDateCellValue();
+                    SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+                    String format = dateFormat.format(dateCellValue);
+                    returnValue = format;
+                    break;
+                }
+                Double doubleValue = cell.getNumericCellValue();
+                DecimalFormat df = new DecimalFormat("###.##");
+                returnValue = df.format(doubleValue);
+                break;
+            case STRING:
+                returnValue = cell.getStringCellValue();
+                break;
+            case BOOLEAN:
+                Boolean booleanValue = cell.getBooleanCellValue();
+                returnValue = booleanValue.toString();
+                break;
+            case BLANK:
+                break;
+            case FORMULA:
+                returnValue = cell.getCellFormula();
+                break;
+            case ERROR:
+                break;
+            default:
+                break;
+        }
+        return returnValue;
+    }
+
+    public static  <T> void writerExcel(Workbook workbook, List<T> objectList, String path,String sheetName) throws Exception {
+        CreationHelper creationHelper = workbook.getCreationHelper();
+        // Class Name to be Sheet Name
+        Sheet sheet = workbook.createSheet(sheetName);
+        // Create Cell Style
+        CellStyle headerCellStyle = workbook.createCellStyle();
+        // Set the Header Style
+        Font headerFont = workbook.createFont();
+        headerFont.setBold(true);
+        headerFont.setFontHeightInPoints((short) 10);
+        headerFont.setColor(IndexedColors.BLACK.getIndex());
+
+        headerCellStyle.setFont(headerFont);
+
+        Row headerRow = sheet.createRow(0);
+        // Date Formatting
+        CellStyle dateCellStyle = workbook.createCellStyle();
+        dateCellStyle.setDataFormat(creationHelper.createDataFormat().getFormat("dd/MM/YY"));
+
+        Field[] fields = objectList.get(0).getClass().getDeclaredFields();
+        int cellNum = 0;
+        Map<String, Integer> indexMap = new ConcurrentHashMap<>();
+        for (int i = 0; i < fields.length; i++) {
+            // According to the Field Create Row Header
+            Field field = fields[i];
+            ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
+            if (null == annotation) {
+                continue;
+            }
+            String name = annotation.name();
+            Cell cell = headerRow.createCell(cellNum);
+            indexMap.put(name, cellNum);
+            cellNum++;
+            cell.setCellValue(name);
+            cell.setCellStyle(headerCellStyle);
+        }
+
+        int startRow = 1;
+        for (T writeObject : objectList) {
+            Row row = sheet.createRow(startRow++);
+            Field[] writeFields = writeObject.getClass().getDeclaredFields();
+            for (int i = 0; i < writeFields.length; i++) {
+                Field writeField = writeFields[i];
+                ExcelColumn annotation = writeField.getAnnotation(ExcelColumn.class);
+                if (null == annotation) {
+                    continue;
+                }
+                String name = annotation.name();
+                Integer index = indexMap.get(name);
+                Cell cell = row.createCell(index);
+                if (Date.class.equals(writeField.getType())) {
+                    cell.setCellStyle(dateCellStyle);
+                    writeField.setAccessible(true);
+                    Object dateValue = writeField.get(writeObject);
+                    cell.setCellValue((Date)dateValue);
+                    continue;
+                }
+                cell.setCellValue(BeanUtils.getProperty(writeObject, writeField.getName()));
+            }
+        }
+
+        // Auto Re-Size
+        for (int i = 0; i < cellNum; i++) {
+            sheet.autoSizeColumn(i);
+        }
+        // Write the output to a file
+        FileOutputStream fileOutputStream = new FileOutputStream(new File(path));
+        workbook.write(fileOutputStream);
+        fileOutputStream.close();
+    }
+}
