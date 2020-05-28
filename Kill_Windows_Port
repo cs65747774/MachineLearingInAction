@@ -1,0 +1,2 @@
+netstat -ano | findstr :PORT_NUMBER     : found out the port used by which process
+taskkill /PID PORT_NUMBER /F            : Force Kill the task
